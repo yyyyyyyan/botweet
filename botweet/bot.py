@@ -46,29 +46,15 @@ class Botweet:
     def set_access(self, access_token=None, access_secret=None):
         if access_token and access_secret:
             self._auth.set_access_token(access_token, access_secret)
-            self._api = tweepy.API(self._auth)
+            self._api = tweepy.API(self._auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
+            self._me = self._api.me()
         else:
             print("Authorize the application in this URL:")
             print(self._auth.get_authorization_url())
             verifier = input("Enter the verifier code: ")
             self.set_access(*self._auth.get_access_token(verifier))
 
-    def stop_event(self, event):
-        if event.is_set():
-            print("Event is already stopped")
-        else:
-            event.set()
-
-    def _start_event(self, func, *args, **kwargs):
-        stop_event = BotweetEvent()
-        args += (stop_event,)
-        thread = Thread(target=func, args=args, kwargs=kwargs)
-        thread.start()
-        return stop_event
-
-    def _upload_medias(self, medias):
-        if len(medias) > 4:
-            raise ValueError("Only 4 medias allowed per tweet")
+    def _upload_media(self, *medias):
         media_ids = []
         for media in medias:
             if os.path.isfile(media):
@@ -85,12 +71,30 @@ class Botweet:
 
     def _tweet(self, get_tweet_func, *args, **kwargs):
         tweet_info = get_tweet_func(*args, **kwargs)
-        if kwargs.get("status"):
-            tweet_info["in_reply_to_status_id"] = kwargs["status"].id
+        if kwargs.get("reply_to"):
+            tweet_info["in_reply_to_status_id"] = kwargs["reply_to"].id
             tweet_info["auto_populate_reply_metadata"] = True
-        if tweet_info.get("medias"):
-            tweet_info["media_ids"] = self._upload_medias(tweet_info["medias"])
+        medias = tweet_info.get("medias")
+        if medias:
+            if len(medias) > 4:
+                raise ValueError("Only 4 medias allowed per tweet")
+            tweet_info["media_ids"] = self._upload_media(*medias)
         self._api.update_status(**tweet_info)
+
+    def _message(self, get_message_func, *args, **kwargs):
+        message_info = get_message_func(*args, **kwargs)
+        media = message_info.get("media")
+        if media:
+            if not isinstance(media, str):
+                raise ValueError("Only 1 media allowed per direct message")
+            message_info["attachment_type"] = "media"
+            message_info["attachment_media_id"], = self._upload_media(media)
+        recipient = kwargs.get("recipient")
+        if recipient:
+            message_info["recipient_id"] = recipient.id
+            self._api.send_direct_message(**message_info)
+        else:
+            raise ValueError("Message must have recipient")
 
     def _get_last_id_and_match(self, tweet_id, text, last_id, regex):
         if tweet_id > last_id:
@@ -100,36 +104,48 @@ class Botweet:
             match = regex.search(text)
         return last_id, match
 
-    def tweet_per_time(self, get_tweet_func, interval, stop_event=None):
+    def tweet_per_time(self, get_tweet_info, interval, stop_event=None):
         if current_thread() is main_thread():
-            return self._start_event(self.tweet_per_time, get_tweet_func, interval)
+            return BotweetEvent(self.tweet_per_time, get_tweet_info, interval)
         while not stop_event.is_set():
-            self._tweet(get_tweet_func)
+            self._tweet(get_tweet_info)
             sleep(interval)
 
-    def _tweet_interact_mentions(self, *args):
-        get_tweet_func, retweet, check_interval, regex, since_id, stop_event = args
-        while not stop_event.is_set():
-            for mention in tweepy.Cursor(self._api.mentions_timeline, since_id=since_id).items():
-                since_id, match = self._get_last_id_and_match(mention.id, mention.text, since_id, regex)
+    def react_to_mentions(self, *args, **kwargs):
+        options = {"check_interval": 60, "regex": None, "since_id": 1, "retweet": False}
+        for key, value in zip(options, args):
+            options[key] = value
+        options.update(kwargs)
+        get_tweet_info = kwargs.get("get_tweet_info")
+        get_message_info = kwargs.get("get_message_info")
+        while not options["stop_event"].is_set():
+            for mention in tweepy.Cursor(self._api.mentions_timeline, since_id=options["since_id"]).items():
+                since_id, match = self._get_last_id_and_match(mention.id, mention.text, options["since_id"], kwargs["regex"])
                 if match:
-                    if retweet:
+                    if options["retweet"]:
                         self._api.retweet(mention.id)
-                    else:
-                        self._tweet(get_tweet_func, status=mention, re_match=match)
-            sleep(check_interval)
+                    if get_tweet_info:
+                        self._tweet(get_tweet_info, reply_to=mention, re_match=match)
+                    if get_message_info:
+                        self._message(get_message_info, recipient=mention.user)
+            sleep(kwargs["check_interval"])
 
-    def tweet_reply_mentions(self, get_tweet_func, check_interval=60, regex=None, since_id=1):
-        return self._start_event(self._tweet_interact_mentions, get_tweet_func, False, check_interval, regex, since_id)
+    def tweet_reply_mentions(self, get_tweet_info, *args, **kwargs):
+        args = get_tweet_info, *args
+        return BotweetEvent(self.react_to_mentions, *args, **kwargs)
 
-    def tweet_retweet_mentions(self, check_interval=60, regex=None, since_id=1):
-        return self._start_event(self._tweet_interact_mentions, None, True, check_interval, regex, since_id)
+    def tweet_retweet_mentions(self, *args, **kwargs):
+        kwargs["retweet"] = True
+        return BotweetEvent(self.react_to_mentions, *args, **kwargs)
 
-    def tweet_reply_messages(self, get_tweet_func, check_interval=60, regex=None, since_id=1, stop_event=None):
+    def tweet_reply_messages(self, get_tweet_func, **kwargs):
         if current_thread() is main_thread():
-            return self._start_event(self.tweet_reply_messages, get_tweet_func, check_interval, regex, since_id)
-        while not stop_event.is_set():
-            messages = [msg for msg in self._api.list_direct_messages() if int(msg.id) > since_id]
+            return BotweetEvent(self.tweet_reply_messages, **kwargs)
+        check_interval = kwargs.get("check_interval", 60)
+        regex = kwargs.get("regex")
+        since_id = kwargs.get("since_id", 1)
+        while not kwargs["stop_event"].is_set():
+            messages = [msg for msg in self._api.list_direct_messages(count=200) if int(msg.id) > since_id and msg.message_create['sender_id'] != self._me.id_str]
             for msg in messages:
                 since_id, match = self._get_last_id_and_match(int(msg.id), msg.message_create['message_data']['text'], since_id, regex)
                 if match:
@@ -146,11 +162,11 @@ class Botweet:
                     if retweet:
                         self._api.retweet(result.id)
                     else:
-                        self._tweet(get_tweet_func, status=result, re_match=match)
+                        self._tweet(get_tweet_func, reply_to=result, re_match=match)
             sleep(check_interval)
 
     def tweet_reply_searches(self, get_tweet_func, query, check_interval=60, regex=None, since_id=1, count=200, **search_parameters):
-        return self._start_event(self._tweet_interact_searches, get_tweet_func, query, False, check_interval, regex, since_id, count, **search_parameters)
+        return BotweetEvent(self._tweet_interact_searches, get_tweet_func, query, False, check_interval, regex, since_id, count, **search_parameters)
 
     def tweet_retweet_searches(self, query, check_interval=60, regex=None, since_id=1, count=200, **search_parameters):
-        return self._start_event(self._tweet_interact_searches, None, query, True, check_interval, regex, since_id, count, **search_parameters)
+        return BotweetEvent(self._tweet_interact_searches, None, query, True, check_interval, regex, since_id, count, **search_parameters)
