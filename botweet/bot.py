@@ -4,7 +4,7 @@ from configparser import ConfigParser
 from tempfile import TemporaryFile
 from shutil import copyfileobj
 from urllib.request import urlopen
-from threading import Thread, current_thread, main_thread
+from threading import current_thread, main_thread
 from time import sleep
 import tweepy
 import os
