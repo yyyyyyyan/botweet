@@ -5,7 +5,7 @@ with open('README.rst') as file:
 
 setup(
     name = 'botweet',
-    version = '0.1.0',
+    version = '0.2.0',
     author = 'yyyyyyyan',
     author_email = 'yanorestes@hotmail.com',
     packages = ['botweet'],
@@ -30,5 +30,6 @@ setup(
         'Programming Language :: Python :: 3.6',
         'Topic :: Communications',
         'Topic :: Utilities',
-    ]
+    ],
+    install_requires=['tweepy']
 )

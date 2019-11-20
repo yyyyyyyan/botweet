@@ -146,7 +146,7 @@ class Botweet:
         while not options["stop_event"].is_set():
             for tweet in tweepy.Cursor(api_method, **method_parameters).items():
                 since_id, match = self._get_last_id_and_match(
-                    mention.id, mention.text, options["since_id"], kwargs["regex"]
+                    tweet.id, tweet.text, options["since_id"], kwargs["regex"]
                 )
                 method_parameters["since_id"] = since_id
                 if match:
@@ -190,7 +190,7 @@ class Botweet:
         return self.react_to_searches(*args, **kwargs)
 
     def react_to_tweets_from_user(self, user, *args, **kwargs):
-        args = self._api.mentions_timeline, *args
+        args = self._api.user_timeline, *args
         kwargs["method_parameters"] = kwargs.get("method_parameters", {})
         kwargs["method_parameters"]["screen_name"] = user
         return BotweetEvent(self.react_to_tweets_from_api_method, *args, **kwargs)
