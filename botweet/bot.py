@@ -22,9 +22,13 @@ class Botweet:
             config = os.environ
 
         try:
-            self._auth = tweepy.OAuthHandler(config["CONSUMER_KEY"], config["CONSUMER_SECRET"])
+            self._auth = tweepy.OAuthHandler(
+                config["CONSUMER_KEY"], config["CONSUMER_SECRET"]
+            )
         except KeyError as err:
-            raise KeyError("Config missing 'CONSUMER_KEY' and 'CONSUMER_SECRET'") from err
+            raise KeyError(
+                "Config missing 'CONSUMER_KEY' and 'CONSUMER_SECRET'"
+            ) from err
         else:
             access_token = config.get("ACCESS_TOKEN")
             access_secret = config.get("ACCESS_SECRET")
@@ -40,13 +44,17 @@ class Botweet:
     @property
     def api(self):
         if self._api is None:
-            raise AttributeError("API not yet configured. Call the set_access method to configure it")
+            raise AttributeError(
+                "API not yet configured. Call the set_access method to configure it"
+            )
         return self._api
 
     def set_access(self, access_token=None, access_secret=None):
         if access_token and access_secret:
             self._auth.set_access_token(access_token, access_secret)
-            self._api = tweepy.API(self._auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True)
+            self._api = tweepy.API(
+                self._auth, wait_on_rate_limit=True, wait_on_rate_limit_notify=True
+            )
             self._me = self._api.me()
         else:
             print("Authorize the application in this URL:")
@@ -88,10 +96,10 @@ class Botweet:
             if not isinstance(media, str):
                 raise ValueError("Only 1 media allowed per direct message")
             message_info["attachment_type"] = "media"
-            message_info["attachment_media_id"], = self._upload_media(media)
+            (message_info["attachment_media_id"],) = self._upload_media(media)
         recipient = kwargs.get("recipient")
         if recipient:
-            message_info["recipient_id"] = recipient.id
+            message_info["recipient_id"] = recipient
             self._api.send_direct_message(**message_info)
         else:
             raise ValueError("Message must have recipient")
@@ -104,6 +112,12 @@ class Botweet:
             match = regex.search(text)
         return last_id, match
 
+    def _get_kwargs(self, options, args, kwargs):
+        for key, value in zip(options, args):
+            options[key] = value
+        options.update(kwargs)
+        return options
+
     def tweet_per_time(self, get_tweet_info, interval, stop_event=None):
         if current_thread() is main_thread():
             return BotweetEvent(self.tweet_per_time, get_tweet_info, interval)
@@ -111,62 +125,123 @@ class Botweet:
             self._tweet(get_tweet_info)
             sleep(interval)
 
-    def react_to_mentions(self, *args, **kwargs):
-        options = {"check_interval": 60, "regex": None, "since_id": 1, "retweet": False}
-        for key, value in zip(options, args):
-            options[key] = value
-        options.update(kwargs)
+    def react_to_tweets_from_api_method(self, api_method, *args, **kwargs):
+        if current_thread() is main_thread():
+            return BotweetEvent(
+                self.react_to_tweets_from_api_method, api_method, *args, **kwargs
+            )
+        options = {
+            "get_tweet_info": None,
+            "get_message_info": None,
+            "check_interval": 60,
+            "regex": None,
+            "since_id": 1,
+            "retweet": False,
+        }
+        kwargs = self._get_kwargs(options, args, kwargs)
         get_tweet_info = kwargs.get("get_tweet_info")
         get_message_info = kwargs.get("get_message_info")
+        method_parameters = kwargs.get("method_parameters", {})
+        method_parameters["since_id"] = options["since_id"]
         while not options["stop_event"].is_set():
-            for mention in tweepy.Cursor(self._api.mentions_timeline, since_id=options["since_id"]).items():
-                since_id, match = self._get_last_id_and_match(mention.id, mention.text, options["since_id"], kwargs["regex"])
+            for tweet in tweepy.Cursor(api_method, **method_parameters).items():
+                since_id, match = self._get_last_id_and_match(
+                    mention.id, mention.text, options["since_id"], kwargs["regex"]
+                )
+                method_parameters["since_id"] = since_id
                 if match:
                     if options["retweet"]:
-                        self._api.retweet(mention.id)
+                        self._api.retweet(tweet.id)
                     if get_tweet_info:
-                        self._tweet(get_tweet_info, reply_to=mention, re_match=match)
+                        self._tweet(get_tweet_info, reply_to=tweet, re_match=match)
                     if get_message_info:
-                        self._message(get_message_info, recipient=mention.user)
+                        self._message(get_message_info, recipient=tweet.user.id)
             sleep(kwargs["check_interval"])
 
-    def tweet_reply_mentions(self, get_tweet_info, *args, **kwargs):
+    def react_to_mentions(self, *args, **kwargs):
+        args = self._api.mentions_timeline, *args
+        return BotweetEvent(self.react_to_tweets_from_api_method, *args, **kwargs)
+
+    def reply_mentions(self, get_tweet_info, *args, **kwargs):
         args = get_tweet_info, *args
-        return BotweetEvent(self.react_to_mentions, *args, **kwargs)
+        return self.react_to_mentions(*args, **kwargs)
 
-    def tweet_retweet_mentions(self, *args, **kwargs):
+    def retweet_mentions(self, *args, **kwargs):
         kwargs["retweet"] = True
-        return BotweetEvent(self.react_to_mentions, *args, **kwargs)
+        return self.react_to_mentions(*args, **kwargs)
 
-    def tweet_reply_messages(self, get_tweet_func, **kwargs):
+    def react_to_searches(self, query, search_parameters=None, *args, **kwargs):
+        args = self._api.search, *args
+        if search_parameters is None:
+            search_parameters = {}
+        search_parameters["q"] = query
+        kwargs["method_parameters"] = search_parameters
+        return BotweetEvent(self.react_to_tweets_from_api_method, *args, **kwargs)
+
+    def reply_searches(
+        self, get_tweet_info, query, search_parameters=None, *args, **kwargs
+    ):
+        args = query, search_parameters, get_tweet_info, *args
+        return self.react_to_searches(*args, **kwargs)
+
+    def retweet_searches(self, query, search_parameters=None, *args, **kwargs):
+        args = query, search_parameters, *args
+        kwargs["retweet"] = True
+        return self.react_to_searches(*args, **kwargs)
+
+    def react_to_tweets_from_user(self, user, *args, **kwargs):
+        args = self._api.mentions_timeline, *args
+        kwargs["method_parameters"] = kwargs.get("method_parameters", {})
+        kwargs["method_parameters"]["screen_name"] = user
+        return BotweetEvent(self.react_to_tweets_from_api_method, *args, **kwargs)
+
+    def reply_tweets_from_user(self, get_tweet_info, user, *args, **kwargs):
+        args = user, get_tweet_info, *args
+        return self.react_to_tweets_from_user(*args, **kwargs)
+
+    def retweet_tweets_from_user(self, user, *args, **kwargs):
+        args = user, *args
+        kwargs["retweet"] = True
+        return self.react_to_tweets_from_user(*args, **kwargs)
+
+    def react_to_messages(self, *args, **kwargs):
         if current_thread() is main_thread():
-            return BotweetEvent(self.tweet_reply_messages, **kwargs)
-        check_interval = kwargs.get("check_interval", 60)
-        regex = kwargs.get("regex")
-        since_id = kwargs.get("since_id", 1)
+            return BotweetEvent(self.react_to_messages, **kwargs)
+        options = {
+            "get_message_info": None,
+            "get_tweet_info": None,
+            "check_interval": 60,
+            "regex": None,
+            "since_id": 1,
+        }
+        kwargs = self._get_kwargs(options, args, kwargs)
+        get_tweet_info = kwargs.get("get_tweet_info")
+        get_message_info = kwargs.get("get_message_info")
         while not kwargs["stop_event"].is_set():
-            messages = [msg for msg in self._api.list_direct_messages(count=200) if int(msg.id) > since_id and msg.message_create['sender_id'] != self._me.id_str]
+            messages = [
+                msg
+                for msg in self._api.list_direct_messages(count=200)
+                if int(msg.id) > kwargs["since_id"]
+                and msg.message_create["sender_id"] != self._me.id_str
+            ]
             for msg in messages:
-                since_id, match = self._get_last_id_and_match(int(msg.id), msg.message_create['message_data']['text'], since_id, regex)
+                since_id, match = self._get_last_id_and_match(
+                    int(msg.id),
+                    msg.message_create["message_data"]["text"],
+                    kwargs["since_id"],
+                    kwargs["regex"],
+                )
+                kwargs["since_id"] = since_id
                 if match:
-                    self._tweet(get_tweet_func, msg=msg, re_match=match)
-            sleep(check_interval)
+                    if get_tweet_info:
+                        self._tweet(get_tweet_info, msg=msg, re_match=match)
+                    if get_message_info:
+                        self._message(
+                            get_message_info,
+                            recipient=int(msg.message_create["sender_id"]),
+                        )
+            sleep(kwargs["check_interval"])
 
-    def _tweet_interact_searches(self, *args, **search_parameters):
-        get_tweet_func, query, retweet, check_interval, regex, since_id, count, stop_event = args
-        while not stop_event.is_set():
-            search_parameters['q'] = query
-            for result in tweepy.Cursor(self._api.search, **search_parameters).items(count):
-                since_id, match = self._get_last_id_and_match(result.id, result.text, since_id, regex)
-                if match:
-                    if retweet:
-                        self._api.retweet(result.id)
-                    else:
-                        self._tweet(get_tweet_func, reply_to=result, re_match=match)
-            sleep(check_interval)
-
-    def tweet_reply_searches(self, get_tweet_func, query, check_interval=60, regex=None, since_id=1, count=200, **search_parameters):
-        return BotweetEvent(self._tweet_interact_searches, get_tweet_func, query, False, check_interval, regex, since_id, count, **search_parameters)
-
-    def tweet_retweet_searches(self, query, check_interval=60, regex=None, since_id=1, count=200, **search_parameters):
-        return BotweetEvent(self._tweet_interact_searches, None, query, True, check_interval, regex, since_id, count, **search_parameters)
+    def reply_messages(self, get_message_info, *args, **kwargs):
+        args = get_message_info, *args
+        return self.react_to_tweets_from_user(*args, **kwargs)
