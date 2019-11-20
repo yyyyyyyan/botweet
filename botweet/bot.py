@@ -10,7 +10,7 @@ import tweepy
 import os
 
 
-class Botweet:
+class Botweet:ss
     def __init__(self, config_dict=None, config_file=None):
         if config_dict:
             config = config_dict
